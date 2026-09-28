@@ -1,51 +1,105 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import List, Dict
 import joblib
-import json
 import numpy as np
+import pandas as pd
+
 
 app = FastAPI()
 
-# ---- Load model + feature order once at startup ----
-model = joblib.load("ppd_rf_classifier.pkl")
 
-with open("ppd_rf_feature_order.json") as f:
-    FEATURE_ORDER = json.load(f)
+# Load XGBoost artifact once when service starts
+artifact = joblib.load("ppd_xgb_artifact.pkl")
+
+model = artifact["model"]
+FEATURE_COLS = artifact["feature_cols"]
+X_COLUMNS = artifact["X_columns"]
+TARGET_COL = artifact["target_col"]
 
 
 class PredictRequest(BaseModel):
-    # The Cloud Function will send: {"features": {featureName: value, ...}}
-    features: dict
+    records: List[Dict[str, float]]
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Luna ML RF service running"}
+    return {
+        "status": "ok",
+        "message": "LunaCare XGBoost PPD risk service running"
+    }
+
+
+def summarize_user_window(df):
+    features = {}
+
+    for col in FEATURE_COLS:
+        values = pd.to_numeric(df[col], errors="coerce")
+
+        features[f"{col}_mean"] = values.mean()
+        features[f"{col}_std"] = values.std()
+        features[f"{col}_min"] = values.min()
+        features[f"{col}_max"] = values.max()
+
+        x = np.arange(len(values))
+        y = values.to_numpy(dtype=float)
+
+        valid = ~np.isnan(y)
+
+        if valid.sum() >= 2:
+            slope = np.polyfit(x[valid], y[valid], 1)[0]
+        else:
+            slope = np.nan
+
+        features[f"{col}_slope"] = slope
+        features[f"{col}_last"] = values.iloc[-1]
+
+    return features
 
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    feats = req.features
+    if not req.records:
+        raise HTTPException(
+            status_code=400,
+            detail="No health records provided"
+        )
 
-    # Build row in the exact order expected by the model
-    row = []
-    for name in FEATURE_ORDER:
-        value = feats.get(name, 0)  # default 0 if missing
-        row.append(float(value))
+    df = pd.DataFrame(req.records)
 
-    X = np.array([row])
+    missing = [
+        col
+        for col in FEATURE_COLS
+        if col not in df.columns
+    ]
 
-    # Predict class
-    pred = int(model.predict(X)[0])
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Missing required features",
+                "missing": missing
+            }
+        )
 
-    # Predict probabilities if available
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(X)[0].tolist()
-    else:
-        proba = None
+    # Use only the columns required by the ML model
+    df = df[FEATURE_COLS]
+
+    # Convert values to numbers
+    df = df.apply(pd.to_numeric, errors="coerce")
+
+    # Convert daily records into the 168 aggregated features
+    summarized = summarize_user_window(df)
+
+    X = pd.DataFrame([summarized])
+
+    # Make sure feature order matches training
+    X = X.reindex(columns=X_COLUMNS)
+
+    risk_score = float(model.predict(X)[0])
 
     return {
-        "class": pred,           # 0 / 1 / 2
-        "probabilities": proba,  # [p0, p1, p2] or null
-        "feature_order": FEATURE_ORDER,
+        "risk_score": risk_score,
+        "target": TARGET_COL,
+        "days_used": len(df)
     }

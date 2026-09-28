@@ -12,8 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the app code and model files
 COPY main.py .
-COPY ppd_rf_classifier.pkl .
-COPY ppd_rf_feature_order.json .
+# COPY ppd_rf_classifier_v2.pkl .
+# COPY ppd_rf_feature_order_v2.json .
+COPY ppd_xgb_artifact.pkl .
 
 # Cloud Run expects the service to listen on $PORT (default 8080)
 ENV PORT=8080
