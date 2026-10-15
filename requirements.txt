@@ -5,3 +5,5 @@ pandas
 joblib
 xgboost
 scikit-learn
+google-cloud-firestore
+google-cloud-storage
